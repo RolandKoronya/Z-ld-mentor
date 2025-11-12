@@ -351,7 +351,6 @@ app.post("/chat", auth, async (req, res) => {
     const completion = await client.responses.create({
       model: "gpt-5",
       input: messages,
-      temperature,
       max_output_tokens: 1500,
     });
 
