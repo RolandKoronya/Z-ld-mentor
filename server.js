@@ -349,10 +349,10 @@ app.post("/chat", auth, async (req, res) => {
 
     // Responses API call
     const completion = await client.responses.create({
-      model: "gpt-4o",
+      model: "gpt-5",
       input: messages,
       temperature,
-      max_output_tokens: 700,
+      max_output_tokens: 1500,
     });
 
     // Extract text
