@@ -10,17 +10,17 @@ import fs from "fs";
 import path from "path";
 import zlib from "zlib";
 
+// ⤵️ New imports for the hybrid KB retriever
+import { loadKB } from "./lib/kb_loader.js";
+import { createRetriever } from "./lib/retriever.js";
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 0) Boot
 // ─────────────────────────────────────────────────────────────────────────────
 dotenv.config();
 
 const app = express();
-
-// Running behind Render/NGINX → trust proxy so req.ip works
 app.set("trust proxy", 1);
-
-// Body parser
 app.use(express.json({ limit: "1mb" }));
 
 // CORS: only allow your sites
@@ -35,65 +35,48 @@ const allowedOrigins = [
 app.use(
   cors({
     origin(origin, callback) {
-      if (!origin) return callback(null, true); // allow curl/Postman
+      if (!origin) return callback(null, true);
       if (allowedOrigins.includes(origin)) return callback(null, true);
       return callback(new Error("Not allowed by CORS"));
     },
   })
 );
 
-// Basic rate limit (tune as needed)
-const limiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 120, // 120 req/min per IP
-});
+// Rate limit
+const limiter = rateLimit({ windowMs: 60 * 1000, max: 120 });
 app.use(limiter);
 
-// Health
+// Health check
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 // ─────────────────────────────────────────────────────────────────────────────
-/** 1) Auth
- * Accepts:
- *  - Authorization: Bearer <PUBLIC_API_TOKEN>
- *  - OR X-Client-Token: <PUBLIC_API_TOKEN>
- */
+// 1) Auth
+// ─────────────────────────────────────────────────────────────────────────────
 const PUBLIC_API_TOKEN =
   process.env.PUBLIC_API_TOKEN || "zoldmentor-demo-1234567890";
+
 function auth(req, res, next) {
   const authHeader = req.headers.authorization || "";
-  const bearer = authHeader.startsWith("Bearer ")
-    ? authHeader.slice(7)
-    : "";
+  const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
   const alt = req.headers["x-client-token"] || "";
   const token = bearer || alt;
-
-  const masked = token
-    ? token.slice(0, 4) + "...(len=" + token.length + ")"
-    : "none";
-  const envSet = !!PUBLIC_API_TOKEN;
   const matches = token && token === PUBLIC_API_TOKEN;
-
-  console.log(`Auth header received: ${masked}`);
-  console.log(`Token from env (exists?): ${envSet}`);
-  console.log(`Token matches stored: ${!!matches}`);
-
   if (!matches) return res.status(401).json({ error: "Unauthorized" });
   return next();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2) OpenAI client (Responses API will be used)
+// 2) OpenAI client
+// ─────────────────────────────────────────────────────────────────────────────
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // ─────────────────────────────────────────────────────────────────────────────
-/** 3) External prompt loader (prompts/base.hu.md)
- *  - buildSystemPrompt() returns the current text
- *  - /admin/reload-prompts to invalidate the cache
- */
+// 3) External prompt loader
+// ─────────────────────────────────────────────────────────────────────────────
 const PROMPT_PATH =
   process.env.PROMPT_PATH ||
   path.join(process.cwd(), "prompts", "base.hu.md");
+
 let cachedSystemPrompt = null;
 let cachedPromptMtime = 0;
 
@@ -116,9 +99,7 @@ function buildSystemPrompt() {
       );
     }
   } catch (e) {
-    console.warn(
-      `[PROMPT] Could not read ${PROMPT_PATH}: ${e.message}`
-    );
+    console.warn(`[PROMPT] Could not read ${PROMPT_PATH}: ${e.message}`);
     cachedSystemPrompt =
       cachedSystemPrompt ||
       "Te vagy a Zöld Mentor. Válaszolj magyarul, világosan.";
@@ -134,10 +115,8 @@ app.post("/admin/reload-prompts", auth, (_req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-/** 4) Per-session memory (in-memory map)
- *  - Session is identified by 'X-Session-Id' (frontend should set it), else IP
- *  - Store last N messages to keep context light
- */
+// 4) Session memory
+// ─────────────────────────────────────────────────────────────────────────────
 const SESSIONS = new Map();
 const MAX_HISTORY = 12;
 
@@ -157,115 +136,39 @@ function pushToHistory(sessionId, msg) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-/** 5) KB / RAG: load shards, search, debug endpoint
- *  - Put your kb_store-000.json.gz .. 003 in repo root
- *  - Optionally set KB_DIR env to override dir
- */
-const KB_DIR = process.env.KB_DIR || process.cwd();
-const KB_GLOB_PREFIX = "kb_store-";
-const KB_GLOB_SUFFIX = ".json.gz";
+// 5) NEW KB SYSTEM — hybrid retriever (replaces old searchKB)
+// ─────────────────────────────────────────────────────────────────────────────
+const kb = loadKB(path.join(process.cwd(), "kb"));
+const retriever = createRetriever(kb, {
+  openaiApiKey: process.env.OPENAI_API_KEY,
+});
 
-// Memory index: [{ id, text, source, embedding: number[] }]
-let KB_INDEX = [];
-let KB_SHARD_FILES = [];
-
-function readGzipJsonArray(absPath) {
-  const raw = fs.readFileSync(absPath);
-  const buf = zlib.gunzipSync(raw);
-  const arr = JSON.parse(buf.toString("utf-8"));
-  if (!Array.isArray(arr))
-    throw new Error(`Shard is not a JSON array: ${absPath}`);
-  return arr;
-}
-
-function loadKBShards() {
+// Quick browser test: /search/debug?q=calendula
+app.get("/search/debug", async (req, res) => {
   try {
-    const files = fs
-      .readdirSync(KB_DIR)
-      .filter(
-        (f) => f.startsWith(KB_GLOB_PREFIX) && f.endsWith(KB_GLOB_SUFFIX)
-      )
-      .sort();
-
-    KB_SHARD_FILES = files;
-
-    if (files.length === 0) {
-      console.warn(
-        `⚠️ [KB] No ${KB_GLOB_PREFIX}*${KB_GLOB_SUFFIX} files found (dir=${KB_DIR})`
-      );
-      return;
-    }
-
-    const all = [];
-    for (const f of files) {
-      const abs = path.join(KB_DIR, f);
-      try {
-        const arr = readGzipJsonArray(abs);
-        if (arr.length === 0) {
-          console.warn(`⚠️ [KB] Shard has 0 chunks: ${f}`);
-        }
-        // Expect objects like { id, text, source, embedding: number[] }
-        for (const item of arr) {
-          if (item && item.text && Array.isArray(item.embedding)) {
-            all.push(item);
-          }
-        }
-      } catch (e) {
-        console.error(`❌ [KB] Failed reading shard: ${f} — ${e.message}`);
-      }
-    }
-    KB_INDEX = all;
-    console.log(
-      `[KB] Loaded ${KB_INDEX.length} chunks from ${files.length} shards (dir=${KB_DIR})`
-    );
-    console.log(`[KB] Shards: ${files.join(", ")}`);
+    const q = req.query.q || "calendula";
+    const hits = await retriever.search(q, { k: 6 });
+    const shaped = hits.map((t) => ({
+      source: t.source,
+      score: Number(t.score.toFixed(4)),
+      preview: t.text.length > 180 ? t.text.slice(0, 180) + "…" : t.text,
+    }));
+    res.json({ count: shaped.length, results: shaped });
   } catch (e) {
-    console.error(`❌ [KB] load error: ${e.message}`);
+    console.error("❌ /search/debug error:", e.message);
+    res.status(500).json({ error: "Search failed" });
   }
-}
+});
 
-function dot(a, b) {
-  let s = 0;
-  for (let i = 0; i < a.length; i++) s += a[i] * b[i];
-  return s;
-}
-function norm(a) {
-  return Math.sqrt(dot(a, a));
-}
-function cosine(a, b) {
-  const na = norm(a),
-    nb = norm(b);
-  if (na === 0 || nb === 0) return 0;
-  return dot(a, b) / (na * nb);
-}
-
-async function searchKB(query, topK = 6) {
-  if (!KB_INDEX.length) return [];
-  const emb = await client.embeddings.create({
-    model: "text-embedding-3-small",
-    input: query,
-  });
-  const qvec = emb.data[0].embedding;
-
-  const scored = KB_INDEX.map((item) => ({
-    item,
-    score: cosine(qvec, item.embedding),
-  }));
-  scored.sort((a, b) => b.score - a.score);
-
-  return scored.slice(0, topK).map(({ item, score }) => ({
-    source: item.source || "kb/unknown",
-    score,
-    text: item.text,
-  }));
-}
-
+// ─────────────────────────────────────────────────────────────────────────────
+// 6) Helper to build system message from KB hits
+// ─────────────────────────────────────────────────────────────────────────────
 function buildKbSystemMessage(kbHits) {
   if (!kbHits || kbHits.length === 0) {
     return {
       role: "system",
       content:
-        "NINCS ELÉRHETŐ KB-KONTEXTUS. Ha a kérdés speciális tudást igényel, mondd ki: 'nincs elég adat a tudástárban', és csak ezután fogalmazz meg óvatos, jelölt feltételezéseket.",
+        "NINCS ELÉRHETŐ KB-KONTEXTUS. Ha a kérdés speciális tudást igényel, mondd ki: 'nincs elég adat a tudástárban'.",
     };
   }
   const sourcesBlock = kbHits
@@ -274,17 +177,8 @@ function buildKbSystemMessage(kbHits) {
 
   return {
     role: "system",
-    content: `KONTEKSTUS (KB-BÓL)
-Az alábbi források **hiteles primer anyagok**. Szabályok:
-- **Elsőbbség:** Először ezekből válaszolj. Ne találj ki új tényeket.
-- **Ha nincs elég adat:** mondd ki expliciten: "nincs elég adat a tudástárban".
-- **Spekuláció:** Csak jelölten („feltételezésem szerint…”) és minimálisan.
-- **Terminológia:** Tartsd meg az eredeti magyar kifejezéseket és stílust.
-- **Eltérés:** Ha a kérés túlnyúlik a forrásokon, jelezd világosan.
-
-FORRÁSOK:
-${sourcesBlock}`,
-    };
+    content: `KONTEKSTUS (KB-BÓL)\n${sourcesBlock}`,
+  };
 }
 
 function buildKbScratchpad(kbHits) {
@@ -294,146 +188,73 @@ function buildKbScratchpad(kbHits) {
     .join("\n");
   return {
     role: "assistant",
-    content: `(SCRATCHPAD – ne idézd szó szerint)
-A válasz alapjául szolgáló források:
-${lines}`,
+    content: `(SCRATCHPAD – ne idézd szó szerint)\nForrások:\n${lines}`,
   };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helper: robustly extract text from GPT-4o / GPT-5 Responses API
-function extractTextFromResponse(resp) {
-  // 1) SDK shortcut
-  if (resp && typeof resp.output_text === "string" && resp.output_text.trim()) {
-    return resp.output_text.trim();
-  }
-  // 2) Structured output array
-  try {
-    if (resp && Array.isArray(resp.output)) {
-      const buf = [];
-      for (const item of resp.output) {
-        if (item && typeof item.output_text === "string" && item.output_text.trim()) {
-          buf.push(item.output_text.trim());
-          continue;
-        }
-        if (item && item.type === "message" && Array.isArray(item.content)) {
-          for (const block of item.content) {
-            if (block && typeof block.text === "string" && block.text.trim()) {
-              buf.push(block.text.trim());
-            }
-          }
-        }
-      }
-      if (buf.length) return buf.join("\n\n").trim();
-    }
-  } catch (e) {
-    console.warn("extractTextFromResponse parse warning:", e.message);
-  }
-  // 3) Other possible locations
-  if (resp && typeof resp.content === "string" && resp.content.trim()) {
-    return resp.content.trim();
-  }
-  return "";
-}
-
-// Debug endpoint to peek at RAG results
-app.post("/debug/rag", auth, async (req, res) => {
-  try {
-    const q = (req.body && req.body.q) ? String(req.body.q) : "";
-    if (!q) return res.status(400).json({ error: "Missing q" });
-
-    const top = await searchKB(q, 6);
-    const shaped = top.map((t) => ({
-      source: t.source,
-      score: Number(t.score.toFixed(4)),
-      preview: t.text.length > 200 ? t.text.slice(0, 200) + "…" : t.text,
-    }));
-    return res.json({ count: shaped.length, results: shaped });
-  } catch (e) {
-    console.error("❌ /debug/rag error:", e.message);
-    return res.status(500).json({ error: "RAG debug failed" });
-  }
-});
-
+// 7) Chat endpoint
 // ─────────────────────────────────────────────────────────────────────────────
-/** 6) /chat — main endpoint
- *  - Builds messages: base system → KB system → (scratchpad) → history → user
- *  - Uses Responses API (GPT-5) — no temperature param
- */
 app.post("/chat", auth, async (req, res) => {
   try {
     const body = req.body || {};
-    // Accept either { messages: [...] } or a simple { message: "..." }
     let incoming = Array.isArray(body.messages) ? body.messages : [];
     if (!incoming.length && body.message) {
       incoming = [{ role: "user", content: String(body.message) }];
     }
-    if (!incoming.length) {
+    if (!incoming.length)
       return res.status(400).json({ error: "Provide messages or message." });
-    }
 
-    // Get the latest user message text
     const lastUser = [...incoming].reverse().find((m) => m.role === "user");
     const userText = lastUser ? String(lastUser.content || "") : "";
-    if (!userText) {
+    if (!userText)
       return res.status(400).json({ error: "Missing user message." });
-    }
 
-    // Session memory
     const sessionId = getSessionId(req);
     const history = getHistory(sessionId);
 
-    // Retrieve KB hits and build strict KB messages
-    const kbHits = await searchKB(userText, 6);
+    // 🔍 Use the hybrid retriever instead of old searchKB
+    const kbHits = await retriever.search(userText, { k: 6 });
     const kbSystem = buildKbSystemMessage(kbHits);
     const kbScratch = buildKbScratchpad(kbHits);
 
-    // Load base system prompt from prompts/base.hu.md
     const baseSystemPromptHu = buildSystemPrompt();
 
-    // Construct the final messages in strict order
     const messages = [
       { role: "system", content: baseSystemPromptHu },
       kbSystem,
       ...(kbScratch ? [kbScratch] : []),
       ...history,
-      ...incoming, // include any prior user/assistant turns sent by frontend (optional)
+      ...incoming,
     ];
 
-    // Responses API call (GPT-5). Leave length to model or set a soft cap.
     const completion = await client.responses.create({
       model: "gpt-5",
       input: messages,
-      // max_output_tokens: 1200, // optional — remove or keep as you prefer
     });
 
-    if (process.env.DEBUG_RESP === "1") {
-      // One-time debug to inspect structure; remove or disable after testing
-      console.dir(completion, { depth: 5 });
-    }
+    const reply =
+      completion.output_text?.trim() ||
+      completion.content?.trim() ||
+      "nincs válasz";
 
-    // Extract text robustly
-    let reply = extractTextFromResponse(completion);
-    if (!reply || !reply.trim()) reply = "nincs válasz";
-
-    // Push to memory (user + assistant turn)
     pushToHistory(sessionId, { role: "user", content: userText });
     pushToHistory(sessionId, { role: "assistant", content: reply });
 
-    return res.json({ ok: true, answer: reply });
+    res.json({ ok: true, answer: reply });
   } catch (e) {
     console.error("❌ /chat error:", e);
-    return res.status(500).json({ error: "Error connecting to OpenAI" });
+    res.status(500).json({ error: "Error connecting to OpenAI" });
   }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 7) Boot: load KB shards, preload prompt, start server
-loadKBShards();
+// 8) Start server
+// ─────────────────────────────────────────────────────────────────────────────
 buildSystemPrompt();
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Zöld Mentor API listening on port ${PORT}`);
-  console.log(`Working directory: ${process.cwd()}`);
+  console.log(`✅ Zöld Mentor API listening on port ${PORT}`);
+  console.log(`📂 KB loaded with ${kb.chunks.length} chunks`);
 });
