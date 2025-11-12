@@ -58,14 +58,19 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
  *  - Authorization: Bearer <PUBLIC_API_TOKEN>
  *  - OR X-Client-Token: <PUBLIC_API_TOKEN>
  */
-const PUBLIC_API_TOKEN = process.env.PUBLIC_API_TOKEN || "zoldmentor-demo-1234567890";
+const PUBLIC_API_TOKEN =
+  process.env.PUBLIC_API_TOKEN || "zoldmentor-demo-1234567890";
 function auth(req, res, next) {
   const authHeader = req.headers.authorization || "";
-  const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+  const bearer = authHeader.startsWith("Bearer ")
+    ? authHeader.slice(7)
+    : "";
   const alt = req.headers["x-client-token"] || "";
   const token = bearer || alt;
 
-  const masked = token ? token.slice(0, 4) + "...(len=" + token.length + ")" : "none";
+  const masked = token
+    ? token.slice(0, 4) + "...(len=" + token.length + ")"
+    : "none";
   const envSet = !!PUBLIC_API_TOKEN;
   const matches = token && token === PUBLIC_API_TOKEN;
 
@@ -86,7 +91,9 @@ const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
  *  - buildSystemPrompt() returns the current text
  *  - /admin/reload-prompts to invalidate the cache
  */
-const PROMPT_PATH = path.join(process.cwd(), "prompts", "base.hu.md");
+const PROMPT_PATH =
+  process.env.PROMPT_PATH ||
+  path.join(process.cwd(), "prompts", "base.hu.md");
 let cachedSystemPrompt = null;
 let cachedPromptMtime = 0;
 
@@ -104,11 +111,17 @@ function buildSystemPrompt() {
     if (!cachedSystemPrompt || stat.mtimeMs !== cachedPromptMtime) {
       cachedSystemPrompt = readFileIfExists(PROMPT_PATH);
       cachedPromptMtime = stat.mtimeMs;
-      console.log(`[PROMPT] Loaded base.hu.md (${PROMPT_PATH}, ${cachedSystemPrompt.length} chars)`);
+      console.log(
+        `[PROMPT] Loaded base.hu.md (${PROMPT_PATH}, ${cachedSystemPrompt.length} chars)`
+      );
     }
   } catch (e) {
-    console.warn(`[PROMPT] Could not read ${PROMPT_PATH}: ${e.message}`);
-    cachedSystemPrompt = cachedSystemPrompt || "Te vagy a Zöld Mentor. Válaszolj magyarul, világosan.";
+    console.warn(
+      `[PROMPT] Could not read ${PROMPT_PATH}: ${e.message}`
+    );
+    cachedSystemPrompt =
+      cachedSystemPrompt ||
+      "Te vagy a Zöld Mentor. Válaszolj magyarul, világosan.";
   }
   return cachedSystemPrompt;
 }
@@ -160,7 +173,8 @@ function readGzipJsonArray(absPath) {
   const raw = fs.readFileSync(absPath);
   const buf = zlib.gunzipSync(raw);
   const arr = JSON.parse(buf.toString("utf-8"));
-  if (!Array.isArray(arr)) throw new Error(`Shard is not a JSON array: ${absPath}`);
+  if (!Array.isArray(arr))
+    throw new Error(`Shard is not a JSON array: ${absPath}`);
   return arr;
 }
 
@@ -168,13 +182,17 @@ function loadKBShards() {
   try {
     const files = fs
       .readdirSync(KB_DIR)
-      .filter((f) => f.startsWith(KB_GLOB_PREFIX) && f.endsWith(KB_GLOB_SUFFIX))
+      .filter(
+        (f) => f.startsWith(KB_GLOB_PREFIX) && f.endsWith(KB_GLOB_SUFFIX)
+      )
       .sort();
 
     KB_SHARD_FILES = files;
 
     if (files.length === 0) {
-      console.warn(`⚠️ [KB] No ${KB_GLOB_PREFIX}*${KB_GLOB_SUFFIX} files found (dir=${KB_DIR})`);
+      console.warn(
+        `⚠️ [KB] No ${KB_GLOB_PREFIX}*${KB_GLOB_SUFFIX} files found (dir=${KB_DIR})`
+      );
       return;
     }
 
@@ -197,7 +215,9 @@ function loadKBShards() {
       }
     }
     KB_INDEX = all;
-    console.log(`[KB] Loaded ${KB_INDEX.length} chunks from ${files.length} shards (dir=${KB_DIR})`);
+    console.log(
+      `[KB] Loaded ${KB_INDEX.length} chunks from ${files.length} shards (dir=${KB_DIR})`
+    );
     console.log(`[KB] Shards: ${files.join(", ")}`);
   } catch (e) {
     console.error(`❌ [KB] load error: ${e.message}`);
@@ -280,6 +300,42 @@ ${lines}`,
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper: robustly extract text from GPT-4o / GPT-5 Responses API
+function extractTextFromResponse(resp) {
+  // 1) SDK shortcut
+  if (resp && typeof resp.output_text === "string" && resp.output_text.trim()) {
+    return resp.output_text.trim();
+  }
+  // 2) Structured output array
+  try {
+    if (resp && Array.isArray(resp.output)) {
+      const buf = [];
+      for (const item of resp.output) {
+        if (item && typeof item.output_text === "string" && item.output_text.trim()) {
+          buf.push(item.output_text.trim());
+          continue;
+        }
+        if (item && item.type === "message" && Array.isArray(item.content)) {
+          for (const block of item.content) {
+            if (block && typeof block.text === "string" && block.text.trim()) {
+              buf.push(block.text.trim());
+            }
+          }
+        }
+      }
+      if (buf.length) return buf.join("\n\n").trim();
+    }
+  } catch (e) {
+    console.warn("extractTextFromResponse parse warning:", e.message);
+  }
+  // 3) Other possible locations
+  if (resp && typeof resp.content === "string" && resp.content.trim()) {
+    return resp.content.trim();
+  }
+  return "";
+}
+
 // Debug endpoint to peek at RAG results
 app.post("/debug/rag", auth, async (req, res) => {
   try {
@@ -302,7 +358,7 @@ app.post("/debug/rag", auth, async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 /** 6) /chat — main endpoint
  *  - Builds messages: base system → KB system → (scratchpad) → history → user
- *  - Uses Responses API and lowers temperature when KB exists
+ *  - Uses Responses API (GPT-5) — no temperature param
  */
 app.post("/chat", auth, async (req, res) => {
   try {
@@ -344,18 +400,21 @@ app.post("/chat", auth, async (req, res) => {
       ...incoming, // include any prior user/assistant turns sent by frontend (optional)
     ];
 
-    // Ground harder if KB is present
-    const temperature = kbHits.length ? 0.2 : 0.5;
-
-    // Responses API call
+    // Responses API call (GPT-5). Leave length to model or set a soft cap.
     const completion = await client.responses.create({
       model: "gpt-5",
       input: messages,
-      max_output_tokens: 1500,
+      // max_output_tokens: 1200, // optional — remove or keep as you prefer
     });
 
-    // Extract text
-    const reply = completion.output_text || "(nincs válasz)";
+    if (process.env.DEBUG_RESP === "1") {
+      // One-time debug to inspect structure; remove or disable after testing
+      console.dir(completion, { depth: 5 });
+    }
+
+    // Extract text robustly
+    let reply = extractTextFromResponse(completion);
+    if (!reply || !reply.trim()) reply = "nincs válasz";
 
     // Push to memory (user + assistant turn)
     pushToHistory(sessionId, { role: "user", content: userText });
