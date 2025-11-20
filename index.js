@@ -1,5 +1,5 @@
 // index.js
-// Zöld Mentor — FINAL CODE: Merged RAG Logic to ensure maximum SDK compatibility
+// Zöld Mentor — FINAL CODE: Merged RAG Logic (Reverted to stable embedContent method)
 
 import express from "express";
 import cors from "cors";
@@ -12,7 +12,6 @@ import path from "path";
 
 // 🟢 FIX: RESTORED THE IMPORT FOR loadKB
 import { loadKB } from "./lib/kb_loader.js"; 
-// ❌ Removed: import { createRetriever } from "./lib/retriever.js"; (Inlined)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 0) Boot & Setup
@@ -149,10 +148,10 @@ app.post("/admin/reload-prompts", auth, (_req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4) RAG RETRIEVER LOGIC (INLINED FROM lib/retriever.js)
+// 4) RAG RETRIEVER LOGIC (INLINED)
 // ─────────────────────────────────────────────────────────────────────────────
 
-const EMBEDDING_MODEL = 'text-embedding-004'; 
+const EMBEDDING_MODEL = 'text-embedding-001'; // 🟢 FIX: Using stable model
 
 /**
  * Manual calculation of Cosine Similarity between two vectors.
@@ -174,25 +173,17 @@ function calculateCosineSimilarity(vecA, vecB) {
 }
 
 /**
- * Creates a function to embed text using the most compatible API structure.
- * 🟢 FIX: Reverts to embedContent but uses a structure known to work in older SDKs.
+ * Creates a function to embed text using the stable embedContent method.
+ * 🟢 FIX: Simplified to the most basic successful structure for stable SDKs.
  */
 async function embedText(aiClient, text) {
-    // Implement simple exponential backoff for robustness
     for (let i = 0; i < 5; i++) {
         try {
-            // Using the basic embedContent method which should exist
+            // Using the basic embedContent method with the content structure
             const response = await aiClient.models.embedContent({
                 model: EMBEDDING_MODEL,
-                // Sending the text as a single string, hoping the older SDK handles it
-                content: text, 
+                content: { parts: [{ text: text }] }, // This is the simplest explicit object structure
             });
-            
-            // If the SDK requires the content property to be an object:
-            // const response = await aiClient.models.embedContent({
-            //     model: EMBEDDING_MODEL,
-            //     content: { parts: [{ text: text }] }, 
-            // });
 
             return response.embedding.values;
         } catch (error) {
@@ -207,7 +198,7 @@ async function embedText(aiClient, text) {
     }
 }
 
-// 🟢 FIX: loadKB is now imported at the top!
+// KB Loader and Retriever Setup
 const kb = loadKB(path.join(process.cwd(), "kb"));
 
 /**
@@ -308,6 +299,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ Zöld Mentor API listening on port ${PORT}`);
   // CACHE BREAK LINE: This is now just documentation, the merge is the fix.
-  console.log(`[CACHE BREAK] RAG FIX ATTEMPTED: 2025-11-20T10:55:00`); 
+  console.log(`[CACHE BREAK] RAG FIX ATTEMPTED: 2025-11-20T11:05:00`); 
   console.log(`📂 KB loaded with ${kb?.chunks?.length || 0} chunks`);
 });
