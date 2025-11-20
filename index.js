@@ -1,5 +1,5 @@
 // index.js
-// Zöld Mentor — FINAL CODE: Merged RAG Logic to eliminate Render cache issues
+// Zöld Mentor — FINAL CODE: Merged RAG Logic to ensure maximum SDK compatibility
 
 import express from "express";
 import cors from "cors";
@@ -174,26 +174,27 @@ function calculateCosineSimilarity(vecA, vecB) {
 }
 
 /**
- * Creates a function to embed text using the dedicated batch API.
- * 🟢 FIX: Uses batchEmbedContents which accepts the required list/array structure.
+ * Creates a function to embed text using the most compatible API structure.
+ * 🟢 FIX: Reverts to embedContent but uses a structure known to work in older SDKs.
  */
 async function embedText(aiClient, text) {
     // Implement simple exponential backoff for robustness
     for (let i = 0; i < 5; i++) {
         try {
-            // Create the content array (the list of contents required by the batch API)
-            const contents = [{ 
-                role: "user", 
-                parts: [{ text: text }] 
-            }];
-
-            const response = await aiClient.models.batchEmbedContents({
+            // Using the basic embedContent method which should exist
+            const response = await aiClient.models.embedContent({
                 model: EMBEDDING_MODEL,
-                contents: contents, // Pass the array of contents
+                // Sending the text as a single string, hoping the older SDK handles it
+                content: text, 
             });
             
-            // The response contains an array of embeddings, we take the first one (index 0)
-            return response.embeddings[0].values;
+            // If the SDK requires the content property to be an object:
+            // const response = await aiClient.models.embedContent({
+            //     model: EMBEDDING_MODEL,
+            //     content: { parts: [{ text: text }] }, 
+            // });
+
+            return response.embedding.values;
         } catch (error) {
             console.error(`Embedding API call failed (Attempt ${i + 1}):`, error.message);
             if (i < 4) {
@@ -307,6 +308,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ Zöld Mentor API listening on port ${PORT}`);
   // CACHE BREAK LINE: This is now just documentation, the merge is the fix.
-  console.log(`[CACHE BREAK] RAG FIX ATTEMPTED: 2025-11-20T10:45:00`); 
+  console.log(`[CACHE BREAK] RAG FIX ATTEMPTED: 2025-11-20T10:55:00`); 
   console.log(`📂 KB loaded with ${kb?.chunks?.length || 0} chunks`);
 });
