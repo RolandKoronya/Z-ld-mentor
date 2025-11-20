@@ -1,11 +1,11 @@
-// server.js
-// Zöld Mentor — secure chat backend migrated to Google Gemini API
+// index.js
+// Zöld Mentor — secure chat backend migrated to Google Gemini API (formerly server.js)
 
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import rateLimit from "express-rate-limit";
-// ➡️ Import the GoogleGenAI client (Replaces OpenAI import)
+// ➡️ Import the GoogleGenAI client
 import { GoogleGenAI } from "@google/genai";
 import fs from "fs";
 import path from "path";
@@ -23,7 +23,7 @@ const app = express();
 app.set("trust proxy", 1);
 app.use(express.json({ limit: "1mb" }));
 
-// CORS: only allow your sites (use the same list from your old server)
+// CORS: only allow your sites
 const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:3000",
@@ -157,9 +157,9 @@ app.post("/admin/reload-prompts", auth, (_req, res) => {
 // 4) KB SYSTEM & Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 const kb = loadKB(path.join(process.cwd(), "kb"));
-// ➡️ This uses the new Gemini-compatible retriever from lib/retriever.js
+// ➡️ This uses the fixed Gemini-compatible retriever from lib/retriever.js
 const retriever = createRetriever(kb, {
-  // Pass the Gemini key, which the new retriever now expects as 'openaiApiKey' for compatibility
+  // Pass the Gemini key, which the new retriever now expects
   openaiApiKey: process.env.GEMINI_API_KEY, 
 });
 
@@ -217,6 +217,7 @@ app.post("/chat", auth, async (req, res) => {
     const finalMessage = `${kbContext}${kbScratch}\n\nFelhasználó kérdése:\n${userText}`;
 
     // 4. Send the message to Gemini (history is managed internally by 'chat')
+    // NOTE: This call automatically attempts to retry, which is good practice.
     const response = await chat.sendMessage({ message: finalMessage });
 
     const reply = response.text?.trim() || "nincs válasz";
@@ -237,5 +238,7 @@ buildSystemPrompt();
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ Zöld Mentor API listening on port ${PORT}`);
+  // ⬅️ CACHE BREAK LINE: This should ensure the latest file is used by the process
+  console.log(`[CACHE BREAK] RAG FIX ATTEMPTED: 2025-11-20T09:57:00`); 
   console.log(`📂 KB loaded with ${kb.chunks.length} chunks`);
 });
