@@ -115,7 +115,7 @@ app.post("/admin/reload-prompts", auth, (_req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4) Session memory
+// 4) Session memory (server-side, per-session)
 // ─────────────────────────────────────────────────────────────────────────────
 const SESSIONS = new Map();
 const MAX_HISTORY = 12;
@@ -133,6 +133,12 @@ function pushToHistory(sessionId, msg) {
   const arr = getHistory(sessionId);
   arr.push(msg);
   if (arr.length > MAX_HISTORY) arr.splice(0, arr.length - MAX_HISTORY);
+}
+
+function clearHistory(sessionId) {
+  if (SESSIONS.has(sessionId)) {
+    SESSIONS.delete(sessionId);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -245,6 +251,44 @@ app.post("/chat", auth, async (req, res) => {
   } catch (e) {
     console.error("❌ /chat error:", e);
     res.status(500).json({ error: "Error connecting to OpenAI" });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7b) History endpoints for global server-side memory
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Return conversation history for current session in frontend-friendly format
+app.get("/history", auth, (req, res) => {
+  try {
+    const sessionId = getSessionId(req);
+    const history = getHistory(sessionId);
+
+    const clientHistory = history.map((msg) => ({
+      who: msg.role === "user" ? "user" : "bot",
+      text: msg.content,
+    }));
+
+    res.json({ ok: true, history: clientHistory });
+  } catch (e) {
+    console.error("❌ /history error:", e);
+    res
+      .status(500)
+      .json({ error: "Nem sikerült betölteni az előzményeket." });
+  }
+});
+
+// Clear conversation history for current session
+app.post("/history/clear", auth, (req, res) => {
+  try {
+    const sessionId = getSessionId(req);
+    clearHistory(sessionId);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("❌ /history/clear error:", e);
+    res
+      .status(500)
+      .json({ error: "Nem sikerült törölni az előzményeket." });
   }
 });
 
