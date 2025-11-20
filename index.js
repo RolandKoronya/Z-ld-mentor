@@ -174,21 +174,26 @@ function calculateCosineSimilarity(vecA, vecB) {
 }
 
 /**
- * Creates a function to embed text using the Gemini API.
+ * Creates a function to embed text using the dedicated batch API.
+ * 🟢 FIX: Uses batchEmbedContents which accepts the required list/array structure.
  */
 async function embedText(aiClient, text) {
     // Implement simple exponential backoff for robustness
     for (let i = 0; i < 5; i++) {
         try {
-            // 🟢 FINAL FIX: Use the explicit Content object structure for text embedding.
-            const response = await aiClient.models.embedContent({
+            // Create the content array (the list of contents required by the batch API)
+            const contents = [{ 
+                role: "user", 
+                parts: [{ text: text }] 
+            }];
+
+            const response = await aiClient.models.batchEmbedContents({
                 model: EMBEDDING_MODEL,
-                // Explicitly send the content as a parts array
-                content: {
-                    parts: [{ text: text }], 
-                },
+                contents: contents, // Pass the array of contents
             });
-            return response.embedding.values;
+            
+            // The response contains an array of embeddings, we take the first one (index 0)
+            return response.embeddings[0].values;
         } catch (error) {
             console.error(`Embedding API call failed (Attempt ${i + 1}):`, error.message);
             if (i < 4) {
@@ -302,6 +307,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ Zöld Mentor API listening on port ${PORT}`);
   // CACHE BREAK LINE: This is now just documentation, the merge is the fix.
-  console.log(`[CACHE BREAK] RAG FIX ATTEMPTED: 2025-11-20T10:35:00`); 
+  console.log(`[CACHE BREAK] RAG FIX ATTEMPTED: 2025-11-20T10:45:00`); 
   console.log(`📂 KB loaded with ${kb?.chunks?.length || 0} chunks`);
 });
