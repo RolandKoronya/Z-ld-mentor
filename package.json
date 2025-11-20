@@ -2,10 +2,10 @@
   "name": "zold-mentor-gemini-backend",
   "version": "1.0.0",
   "description": "Secure Node.js backend for Zöld Mentor (Gemini API)",
-  "main": "server.js",
+  "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node index.js"
   },
   "dependencies": {
     "@google/genai": "^0.13.0",
