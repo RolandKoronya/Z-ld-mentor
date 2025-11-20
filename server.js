@@ -115,30 +115,34 @@ app.post("/admin/reload-prompts", auth, (_req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4) Session memory (server-side, per-session)
+// 4) Conversation memory (keyed by user ID when available)
 // ─────────────────────────────────────────────────────────────────────────────
 const SESSIONS = new Map();
 const MAX_HISTORY = 12;
 
-function getSessionId(req) {
-  return (req.headers["x-session-id"] || req.ip || "anon").toString();
+/**
+ * Build a stable conversation key:
+ * - if X-User-Id header is present  → use that (global per user)
+ * - else if X-Session-Id is present → use that (per browser session)
+ * - else fall back to IP-based key  → last resort
+ */
+function getConversationKey(req) {
+  const userId = req.headers["x-user-id"];
+  if (userId) return `user:${userId}`;
+  const sessionId = req.headers["x-session-id"];
+  if (sessionId) return `session:${sessionId}`;
+  return `ip:${req.ip || "anon"}`;
 }
 
-function getHistory(sessionId) {
-  if (!SESSIONS.has(sessionId)) SESSIONS.set(sessionId, []);
-  return SESSIONS.get(sessionId);
+function getHistory(convKey) {
+  if (!SESSIONS.has(convKey)) SESSIONS.set(convKey, []);
+  return SESSIONS.get(convKey);
 }
 
-function pushToHistory(sessionId, msg) {
-  const arr = getHistory(sessionId);
+function pushToHistory(convKey, msg) {
+  const arr = getHistory(convKey);
   arr.push(msg);
   if (arr.length > MAX_HISTORY) arr.splice(0, arr.length - MAX_HISTORY);
-}
-
-function clearHistory(sessionId) {
-  if (SESSIONS.has(sessionId)) {
-    SESSIONS.delete(sessionId);
-  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -216,8 +220,8 @@ app.post("/chat", auth, async (req, res) => {
     if (!userText)
       return res.status(400).json({ error: "Missing user message." });
 
-    const sessionId = getSessionId(req);
-    const history = getHistory(sessionId);
+    const convKey = getConversationKey(req);
+    const history = getHistory(convKey);
 
     // 🔍 Use the hybrid retriever instead of old searchKB
     const kbHits = await retriever.search(userText, { k: 6 });
@@ -244,51 +248,13 @@ app.post("/chat", auth, async (req, res) => {
       completion.content?.trim() ||
       "nincs válasz";
 
-    pushToHistory(sessionId, { role: "user", content: userText });
-    pushToHistory(sessionId, { role: "assistant", content: reply });
+    pushToHistory(convKey, { role: "user", content: userText });
+    pushToHistory(convKey, { role: "assistant", content: reply });
 
     res.json({ ok: true, answer: reply });
   } catch (e) {
     console.error("❌ /chat error:", e);
     res.status(500).json({ error: "Error connecting to OpenAI" });
-  }
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 7b) History endpoints for global server-side memory
-// ─────────────────────────────────────────────────────────────────────────────
-
-// Return conversation history for current session in frontend-friendly format
-app.get("/history", auth, (req, res) => {
-  try {
-    const sessionId = getSessionId(req);
-    const history = getHistory(sessionId);
-
-    const clientHistory = history.map((msg) => ({
-      who: msg.role === "user" ? "user" : "bot",
-      text: msg.content,
-    }));
-
-    res.json({ ok: true, history: clientHistory });
-  } catch (e) {
-    console.error("❌ /history error:", e);
-    res
-      .status(500)
-      .json({ error: "Nem sikerült betölteni az előzményeket." });
-  }
-});
-
-// Clear conversation history for current session
-app.post("/history/clear", auth, (req, res) => {
-  try {
-    const sessionId = getSessionId(req);
-    clearHistory(sessionId);
-    res.json({ ok: true });
-  } catch (e) {
-    console.error("❌ /history/clear error:", e);
-    res
-      .status(500)
-      .json({ error: "Nem sikerült törölni az előzményeket." });
   }
 });
 
