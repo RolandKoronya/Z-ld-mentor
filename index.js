@@ -10,7 +10,8 @@ import { GoogleGenAI } from "@google/genai";
 import fs from "fs";
 import path from "path";
 
-// ❌ Removed: import { loadKB } from "./lib/kb_loader.js";
+// 🟢 FIX: RESTORED THE IMPORT FOR loadKB
+import { loadKB } from "./lib/kb_loader.js"; 
 // ❌ Removed: import { createRetriever } from "./lib/retriever.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -197,8 +198,7 @@ async function embedText(aiClient, text) {
     }
 }
 
-// ❌ NOTE: We must assume loadKB exists globally or we create a placeholder.
-// Since loadKB likely comes from kb_loader.js and is essential for 'kb', we assume it works.
+// 🟢 FIX: loadKB is now imported at the top!
 const kb = loadKB(path.join(process.cwd(), "kb"));
 
 /**
@@ -273,7 +273,7 @@ app.post("/chat", auth, async (req, res) => {
     // 2. Perform RAG Search using the inlined function
     const kbHits = await retrieveContext(userText, { k: 6 });
     const kbContext = buildKbSystemMessage(kbHits);
-    const kbScratch = buildKbScratchpad(kbHits);
+    kbScratch = buildKbScratchpad(kbHits); // Removed const declaration
 
     // 3. Build the final prompt
     const finalMessage = `${kbContext}${kbScratch}\n\nFelhasználó kérdése:\n${userText}`;
@@ -300,6 +300,5 @@ app.listen(PORT, () => {
   console.log(`✅ Zöld Mentor API listening on port ${PORT}`);
   // CACHE BREAK LINE: This is now just documentation, the merge is the fix.
   console.log(`[CACHE BREAK] RAG FIX ATTEMPTED: 2025-11-20T10:20:00`); 
-  // We assume loadKB is now defined and working from kb_loader.js or inlined.
   console.log(`📂 KB loaded with ${kb?.chunks?.length || 0} chunks`);
 });
