@@ -1,21 +1,18 @@
 {
-  "name": "zold-mentor-backend",
+  "name": "zold-mentor-gemini-backend",
   "version": "1.0.0",
-  "description": "Zöld Mentor – herbalism mentor backend",
-  "type": "module",
+  "description": "Secure Node.js backend for Zöld Mentor (Gemini API)",
   "main": "server.js",
+  "type": "module",
   "scripts": {
     "start": "node server.js"
   },
-  "engines": {
-    "node": "20.x"
-  },
-  "license": "ISC",
   "dependencies": {
+    "@google/genai": "^0.1.0",
+    "cosine-similarity": "^1.2.0",
     "cors": "^2.8.5",
-    "dotenv": "^16.6.1",
-    "express": "^5.1.0",
-    "express-rate-limit": "^8.2.1",
-    "openai": "^6.8.1"
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.1.5"
   }
 }

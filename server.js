@@ -1,21 +1,21 @@
 // server.js
-// Zöld Mentor — secure chat backend with per-session memory + external prompts + KB (RAG)
+// Zöld Mentor — secure chat backend migrated to Google Gemini API
 
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import rateLimit from "express-rate-limit";
-import OpenAI from "openai";
+// ➡️ Import the GoogleGenAI client (Replaces OpenAI import)
+import { GoogleGenAI } from "@google/genai";
 import fs from "fs";
 import path from "path";
-import zlib from "zlib";
 
-// ⤵️ New imports for the hybrid KB retriever
+// ⤵️ Imports for the hybrid KB retriever
 import { loadKB } from "./lib/kb_loader.js";
 import { createRetriever } from "./lib/retriever.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 0) Boot
+// 0) Boot & Setup
 // ─────────────────────────────────────────────────────────────────────────────
 dotenv.config();
 
@@ -23,7 +23,7 @@ const app = express();
 app.set("trust proxy", 1);
 app.use(express.json({ limit: "1mb" }));
 
-// CORS: only allow your sites
+// CORS: only allow your sites (use the same list from your old server)
 const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:3000",
@@ -66,9 +66,48 @@ function auth(req, res, next) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2) OpenAI client
+// 2) Gemini client and session management
 // ─────────────────────────────────────────────────────────────────────────────
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+if (!GEMINI_API_KEY) {
+  console.error("FATAL: GEMINI_API_KEY environment variable is not set.");
+  process.exit(1);
+}
+const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+
+const SESSIONS = new Map();
+
+function getSessionId(req) {
+  // Use the same headers your frontend sends
+  return (req.headers["x-session-id"] || req.ip || "anon").toString();
+}
+
+/**
+ * Retrieves or creates a Gemini ChatSession for a given ID.
+ * The session object internally manages history.
+ * @param {string} sessionId
+ * @param {string} systemInstructionText
+ */
+function getOrCreateChatSession(sessionId, systemInstructionText) {
+  if (SESSIONS.has(sessionId)) {
+    return SESSIONS.get(sessionId);
+  }
+
+  console.log(`Creating new Gemini ChatSession for ID: ${sessionId}`);
+
+  // ➡️ Using gemini-2.5-pro for high-quality, complex reasoning tasks.
+  const chat = ai.chats.create({
+    model: "gemini-2.5-pro", 
+    config: {
+      systemInstruction: {
+        parts: [{ text: systemInstructionText }],
+      },
+    }
+  });
+
+  SESSIONS.set(sessionId, chat);
+  return chat;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 3) External prompt loader
@@ -115,141 +154,83 @@ app.post("/admin/reload-prompts", auth, (_req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4) Session memory
-// ─────────────────────────────────────────────────────────────────────────────
-const SESSIONS = new Map();
-const MAX_HISTORY = 12;
-
-function getSessionId(req) {
-  return (req.headers["x-session-id"] || req.ip || "anon").toString();
-}
-
-function getHistory(sessionId) {
-  if (!SESSIONS.has(sessionId)) SESSIONS.set(sessionId, []);
-  return SESSIONS.get(sessionId);
-}
-
-function pushToHistory(sessionId, msg) {
-  const arr = getHistory(sessionId);
-  arr.push(msg);
-  if (arr.length > MAX_HISTORY) arr.splice(0, arr.length - MAX_HISTORY);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 5) NEW KB SYSTEM — hybrid retriever (replaces old searchKB)
+// 4) KB SYSTEM & Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 const kb = loadKB(path.join(process.cwd(), "kb"));
+// ➡️ This uses the new Gemini-compatible retriever from lib/retriever.js
 const retriever = createRetriever(kb, {
-  openaiApiKey: process.env.OPENAI_API_KEY,
+  // Pass the Gemini key, which the new retriever now expects as 'openaiApiKey' for compatibility
+  openaiApiKey: process.env.GEMINI_API_KEY, 
 });
 
-// Quick browser test: /search/debug?q=calendula
-app.get("/search/debug", async (req, res) => {
-  try {
-    const q = req.query.q || "calendula";
-    const hits = await retriever.search(q, { k: 6 });
-    const shaped = hits.map((t) => ({
-      source: t.source,
-      score: Number(t.score.toFixed(4)),
-      preview: t.text.length > 180 ? t.text.slice(0, 180) + "…" : t.text,
-    }));
-    res.json({ count: shaped.length, results: shaped });
-  } catch (e) {
-    console.error("❌ /search/debug error:", e.message);
-    res.status(500).json({ error: "Search failed" });
-  }
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 6) Helper to build system message from KB hits
-// ─────────────────────────────────────────────────────────────────────────────
 function buildKbSystemMessage(kbHits) {
   if (!kbHits || kbHits.length === 0) {
-    return {
-      role: "system",
-      content:
-        "NINCS ELÉRHETŐ KB-KONTEXTUS. Ha a kérdés speciális tudást igényel, mondd ki: 'nincs elég adat a tudástárban'.",
-    };
+    return ""; 
   }
   const sourcesBlock = kbHits
     .map((h, i) => `#${i + 1} FORRÁS: ${h.source}\n${h.text}`)
     .join("\n\n---\n\n");
 
-  return {
-    role: "system",
-    content: `KONTEKSTUS (KB-BÓL)\n${sourcesBlock}`,
-  };
+  // This RAG context is inserted directly into the user's message
+  return `KONTEKSTUS (KB-BÓL)\n${sourcesBlock}\n\n---\n\n`;
 }
 
 function buildKbScratchpad(kbHits) {
-  if (!kbHits || kbHits.length === 0) return null;
+  if (!kbHits || kbHits.length === 0) return "";
   const lines = kbHits
     .map((h, i) => `#${i + 1} ${h.source} (score=${h.score.toFixed(3)})`)
     .join("\n");
-  return {
-    role: "assistant",
-    content: `(SCRATCHPAD – ne idézd szó szerint)\nForrások:\n${lines}`,
-  };
+  // This scratchpad is also inserted directly into the user's message
+  return `(SCRATCHPAD – Források:\n${lines})`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 7) Chat endpoint
+// 5) Chat endpoint
 // ─────────────────────────────────────────────────────────────────────────────
 app.post("/chat", auth, async (req, res) => {
   try {
     const body = req.body || {};
     let incoming = Array.isArray(body.messages) ? body.messages : [];
+    
+    // Fallback to reading body.message if messages array is empty
     if (!incoming.length && body.message) {
       incoming = [{ role: "user", content: String(body.message) }];
     }
-    if (!incoming.length)
-      return res.status(400).json({ error: "Provide messages or message." });
-
+    
     const lastUser = [...incoming].reverse().find((m) => m.role === "user");
     const userText = lastUser ? String(lastUser.content || "") : "";
     if (!userText)
       return res.status(400).json({ error: "Missing user message." });
 
     const sessionId = getSessionId(req);
-    const history = getHistory(sessionId);
-
-    // 🔍 Use the hybrid retriever instead of old searchKB
-    const kbHits = await retriever.search(userText, { k: 6 });
-    const kbSystem = buildKbSystemMessage(kbHits);
-    const kbScratch = buildKbScratchpad(kbHits);
-
     const baseSystemPromptHu = buildSystemPrompt();
 
-    const messages = [
-      { role: "system", content: baseSystemPromptHu },
-      kbSystem,
-      ...(kbScratch ? [kbScratch] : []),
-      ...history,
-      ...incoming,
-    ];
+    // 1. Get/Create the Gemini ChatSession with the system prompt
+    const chat = getOrCreateChatSession(sessionId, baseSystemPromptHu);
 
-    const completion = await client.responses.create({
-      model: "gpt-5",
-      input: messages,
-    });
+    // 2. Perform RAG Search
+    const kbHits = await retriever.search(userText, { k: 6 });
+    const kbContext = buildKbSystemMessage(kbHits);
+    const kbScratch = buildKbScratchpad(kbHits);
 
-    const reply =
-      completion.output_text?.trim() ||
-      completion.content?.trim() ||
-      "nincs válasz";
+    // 3. Build the final prompt by prepending RAG context to the user's message
+    const finalMessage = `${kbContext}${kbScratch}\n\nFelhasználó kérdése:\n${userText}`;
 
-    pushToHistory(sessionId, { role: "user", content: userText });
-    pushToHistory(sessionId, { role: "assistant", content: reply });
+    // 4. Send the message to Gemini (history is managed internally by 'chat')
+    const response = await chat.sendMessage({ message: finalMessage });
+
+    const reply = response.text?.trim() || "nincs válasz";
 
     res.json({ ok: true, answer: reply });
   } catch (e) {
     console.error("❌ /chat error:", e);
-    res.status(500).json({ error: "Error connecting to OpenAI" });
+    // ➡️ Update error message for Gemini
+    res.status(500).json({ error: "Error connecting to Gemini API" });
   }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 8) Start server
+// 6) Start server
 // ─────────────────────────────────────────────────────────────────────────────
 buildSystemPrompt();
 
