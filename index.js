@@ -12,7 +12,7 @@ import path from "path";
 
 // 🟢 FIX: RESTORED THE IMPORT FOR loadKB
 import { loadKB } from "./lib/kb_loader.js"; 
-// ❌ Removed: import { createRetriever } from "./lib/retriever.js";
+// ❌ Removed: import { createRetriever } from "./lib/retriever.js"; (Inlined)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 0) Boot & Setup
@@ -180,10 +180,13 @@ async function embedText(aiClient, text) {
     // Implement simple exponential backoff for robustness
     for (let i = 0; i < 5; i++) {
         try {
-            // 🟢 CORRECT FIX: Directly passes text as content
+            // 🟢 FINAL FIX: Use the explicit Content object structure for text embedding.
             const response = await aiClient.models.embedContent({
                 model: EMBEDDING_MODEL,
-                content: text, 
+                // Explicitly send the content as a parts array
+                content: {
+                    parts: [{ text: text }], 
+                },
             });
             return response.embedding.values;
         } catch (error) {
@@ -273,7 +276,7 @@ app.post("/chat", auth, async (req, res) => {
     // 2. Perform RAG Search using the inlined function
     const kbHits = await retrieveContext(userText, { k: 6 });
     const kbContext = buildKbSystemMessage(kbHits);
-    kbScratch = buildKbScratchpad(kbHits); // Removed const declaration
+    const kbScratch = buildKbScratchpad(kbHits); 
 
     // 3. Build the final prompt
     const finalMessage = `${kbContext}${kbScratch}\n\nFelhasználó kérdése:\n${userText}`;
@@ -299,6 +302,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ Zöld Mentor API listening on port ${PORT}`);
   // CACHE BREAK LINE: This is now just documentation, the merge is the fix.
-  console.log(`[CACHE BREAK] RAG FIX ATTEMPTED: 2025-11-20T10:20:00`); 
+  console.log(`[CACHE BREAK] RAG FIX ATTEMPTED: 2025-11-20T10:35:00`); 
   console.log(`📂 KB loaded with ${kb?.chunks?.length || 0} chunks`);
 });
