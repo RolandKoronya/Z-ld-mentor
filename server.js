@@ -32,6 +32,7 @@ const allowedOrigins = [
   "https://theherbalconservatory.eu",
   "https://www.theherbalconservatory.eu",
 ];
+
 app.use(
   cors({
     origin(origin, callback) {
@@ -146,6 +147,46 @@ function pushToHistory(convKey, msg) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 4b) Conversation history endpoint (for frontend UI)
+// ─────────────────────────────────────────────────────────────────────────────
+app.get("/history", auth, (req, res) => {
+  try {
+    const convKey = getConversationKey(req);
+    const hist = getHistory(convKey) || [];
+
+    const messages = hist
+      .filter(
+        (m) =>
+          m &&
+          typeof m.content === "string" &&
+          (m.role === "user" || m.role === "assistant")
+      )
+      .map((m) => ({
+        who: m.role === "user" ? "user" : "bot",
+        text: m.content,
+      }));
+
+    res.json({ ok: true, messages });
+  } catch (e) {
+    console.error("❌ /history error:", e);
+    res.status(500).json({ ok: false, error: "History fetch failed" });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4c) Lightweight analytics endpoint (optional)
+// ─────────────────────────────────────────────────────────────────────────────
+app.post("/log", auth, (req, res) => {
+  try {
+    const payload = req.body || {};
+    console.log("📈 ZM analytics:", JSON.stringify(payload));
+  } catch (e) {
+    console.warn("⚠️ /log parse error:", e.message);
+  }
+  res.json({ ok: true });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 5) NEW KB SYSTEM — hybrid retriever (replaces old searchKB)
 // ─────────────────────────────────────────────────────────────────────────────
 const kb = loadKB(path.join(process.cwd(), "kb"));
@@ -168,6 +209,19 @@ app.get("/search/debug", async (req, res) => {
     console.error("❌ /search/debug error:", e.message);
     res.status(500).json({ error: "Search failed" });
   }
+});
+
+// Optional: KB stats + prompt preview helpers
+app.get("/kb-stats", auth, (_req, res) => {
+  res.json({
+    ok: true,
+    chunks: kb.chunks ? kb.chunks.length : 0,
+  });
+});
+
+app.get("/system-prompt-preview", auth, (_req, res) => {
+  const text = buildSystemPrompt();
+  res.json({ ok: true, length: text.length });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
